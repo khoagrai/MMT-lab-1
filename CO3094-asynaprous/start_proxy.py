@@ -73,8 +73,8 @@ def parse_virtual_hosts(config_file):
         map = map + proxy_passes
         proxy_map[host] = map
 
-        # Find dist_policy if present
-        policy_match = re.search(r'dist_policy\s+(\w+)', block)
+        # Find dist_policy if present (Sửa lại regex để đọc được dấu gạch ngang)
+        policy_match = re.search(r'dist_policy\s+([\w-]+)', block)
         if policy_match:
             dist_policy_map = policy_match.group(1)
         else: #default policy is round_robin
