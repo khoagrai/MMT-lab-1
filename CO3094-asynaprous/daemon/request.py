@@ -22,6 +22,19 @@ from .dictionary import CaseInsensitiveDict
 class Request():
     """The fully mutable "class" `Request <Request>` object,
     containing the exact bytes that will be sent to the server.
+
+    Instances are generated from a "class" `Request <Request>` object, and
+    should not be instantiated manually; doing so may produce undesirable
+    effects.
+
+    Usage::
+
+      >>> import deamon.request
+      >>> req = request.Request()
+      ## Incoming message obtain aka. incoming_msg
+      >>> r = req.prepare(incoming_msg)
+      >>> r
+      <Request>
     """
     __attrs__ = [
         "method",
@@ -38,42 +51,48 @@ class Request():
     ]
 
     def __init__(self):
+        #: HTTP verb to send to the server.
         self.method = None
+        #: HTTP URL to send the request to.
         self.url = None
-        # Khởi tạo headers bằng CaseInsensitiveDict để tránh lỗi NoneType
-        self.headers = CaseInsensitiveDict() 
+        #: dictionary of HTTP headers.
+        self.headers = None
+        #: HTTP path
         self.path = None        
-        self.cookies = {}
+        # The cookies set used to create Cookie header
+        self.cookies = None
+        #: request body to send to the server.
         self.body = None
+        # The raw header
         self._raw_headers = None
+        #: The raw body
         self._raw_body = None
+        #: Routes
         self.routes = {}
+        #: Hook point for routed mapped-path
         self.hook = None
 
     def extract_request_line(self, request):
         try:
             lines = request.splitlines()
-            if not lines:
-                return None, None, None
             first_line = lines[0]
             method, path, version = first_line.split()
 
             if path == '/':
                 path = '/index.html'
         except Exception:
-            return None, None, None
+            return None, None
 
         return method, path, version
              
     def prepare_headers(self, request):
         """Prepares the given HTTP headers."""
         lines = request.split('\r\n')
-        headers = CaseInsensitiveDict()
+        headers = {}
         for line in lines[1:]:
-            if ':' in line:
-                key, val = line.split(':', 1)
-                # Dùng .strip() để xóa khoảng trắng thừa thay vì hardcode ': '
-                headers[key.strip()] = val.strip()
+            if ': ' in line:
+                key, val = line.split(': ', 1)
+                headers[key.lower()] = val
         return headers
 
     def fetch_headers_body(self, request):
@@ -88,44 +107,62 @@ class Request():
     def prepare(self, request, routes=None):
         """Prepares the entire request with the given parameters."""
 
-        # 1. Bóc tách Header và Body (SỬA LỖI Ở ĐÂY)
-        self._raw_headers, self._raw_body = self.fetch_headers_body(request)
-
-        # 2. Lấy Method, Path
-        self.method, self.path, self.version = self.extract_request_line(self._raw_headers)
+        # Prepare the request line from the request header
+        print("[Request] prepare request missg {}".format(request))
+        self.method, self.path, self.version = self.extract_request_line(request)
         print("[Request] {} path {} version {}".format(self.method, self.path, self.version))
 
-        # 3. Parse Header thành Dictionary (QUAN TRỌNG: Vá lỗi NoneType)
-        self.headers = self.prepare_headers(self._raw_headers)
+        #
+        # @bksysnet Preapring the webapp hook with AsynapRous instance
+        # The default behaviour with HTTP server is empty routed
+        #
+        # TODO manage the webapp hook in this mounting point
+        #
         
-        # 4. Gán Body
-        self.body = self._raw_body
-
-        # 5. Xử lý Hook (Route)
-        if routes is not None and routes != {}:
+        if not routes == {}:
             self.routes = routes
             print("[Request] Routing METHOD {} path {}".format(self.method, self.path))
             self.hook = routes.get((self.method, self.path))
-            if self.hook:
-                print("[Request] Hook has request {}".format(self.hook))
+            print("[Request] Hook has request {}".format(request))
+            #
+            # self.hook manipulation goes here
+            # ...
+            #
 
-        # 6. Xử lý Cookie
-        cookies_str = self.headers.get('Cookie', '')
-        self.cookies = cookies_str
+        self._raw_heaers = ""
+        self._raw_body =  ""
+        cookies = self.headers.get('cookie', '')
+            #
+            #  TODO: implement the cookie function here
+            #        by parsing the header            #
 
         return
 
     def prepare_body(self, data, files, json=None):
         self.prepare_content_length(self.body)
-        self.body = data # Fix lỗi logic gán sai body
+        self.body = body
+        #
+        # TODO prepare the request authentication
+        #
+	# self.auth = ...
         return
+
 
     def prepare_content_length(self, body):
-        self.headers["Content-Length"] = str(len(body)) if body else "0"
+        self.headers["Content-Length"] = "0"
+        #
+        # TODO prepare the request authentication
+        #
+	# self.auth = ...
         return
 
+
     def prepare_auth(self, auth, url=""):
+        #
+        # TODO prepare the request authentication
+        #
+	# self.auth = ...
         return
 
     def prepare_cookies(self, cookies):
-        self.headers["Cookie"] = cookies
+            self.headers["Cookie"] = cookies
