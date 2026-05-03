@@ -254,6 +254,129 @@ async def hello(headers="guest", body="anonymous"):
         }
     )
 
+PEERS = {}
+CHANNELS = {}
+
+@app.route("/submit-info", methods=["POST"])
+def submit_info(headers="guest", body="anonymous"):
+    payload = _parse_body(body)
+    peer_id = payload.get("peer_id")
+    ip = payload.get("ip")
+    port = payload.get("port")
+
+    if not peer_id or not ip or not port:
+        return _response(
+            {
+                "ok": False,
+                "message": "Missing peer_id, ip, or port",
+            },
+            status_code=400,
+        )
+    existing_channels = PEERS.get(peer_id, {}).get("channels", [])
+    PEERS[peer_id] = {
+        "ip": ip,
+        "port": port,
+        "channels": existing_channels,
+        "status": "online",
+        "last_seen": time.time(),
+    }
+
+    print(f"[Tracker] Peer registered/updated: {peer_id} at {ip}:{port}")
+    
+    return _response(
+        {
+            "ok": True,
+            "message": "Peer info submitted successfully",
+            "peer_id": peer_id,
+        }
+    )
+
+@app.route("/add-list", methods=["POST"])
+def add_list(headers="guest", body="anonymous"):
+    payload = _parse_body(body)
+    peer_id = payload.get("peer_id")
+    channel = payload.get("channel")
+
+    if not peer_id or not channel:
+        return _response(
+            {
+                "ok": False,
+                "message": "Missing peer_id or channel",
+            },
+            status_code=400,
+        )
+
+    if peer_id not in PEERS:
+        return _response(
+            {
+                "ok": False,
+                "message": f"Peer {peer_id} not registered. Call /submit-info first.",
+            },
+            status_code=404,
+        )
+
+    if channel not in CHANNELS:
+        CHANNELS[channel] = set()
+    CHANNELS[channel].add(peer_id)
+
+    if channel not in PEERS[peer_id]["channels"]:
+        PEERS[peer_id]["channels"].append(channel)
+        
+    PEERS[peer_id]["last_seen"] = time.time()
+
+    print(f"[Tracker] Peer {peer_id} joined channel {channel}")
+
+    return _response(
+        {
+            "ok": True,
+            "message": f"Added to channel {channel}",
+        }
+    )
+
+@app.route("/get-list", methods=["GET", "POST"])
+def get_list(headers="guest", body="anonymous"):
+    serializable_channels = {ch: list(members) for ch, members in CHANNELS.items()}
+    
+    return _response(
+        {
+            "ok": True,
+            "peers": PEERS,
+            "channels": serializable_channels,
+        }
+    )
+
+@app.route("/connect-peer", methods=["POST"])
+def connect_peer(headers="guest", body="anonymous"):
+    payload = _parse_body(body)
+    target_id = payload.get("target_peer_id")
+
+    if not target_id:
+        return _response(
+            {
+                "ok": False,
+                "message": "Missing target_peer_id",
+            },
+            status_code=400,
+        )
+
+    target_peer = PEERS.get(target_id)
+    if not target_peer:
+        return _response(
+            {
+                "ok": False,
+                "message": "Peer not found or offline",
+            },
+            status_code=404,
+        )
+
+    return _response(
+        {
+            "ok": True,
+            "target_peer_id": target_id,
+            "ip": target_peer["ip"],
+            "port": target_peer["port"],
+        }
+    )
 
 def create_sampleapp(ip, port):
     app.prepare_address(ip, port)
