@@ -18,6 +18,7 @@ app.sampleapp
 import json
 import secrets
 import time
+import threading
 from urllib.parse import parse_qs
 
 from daemon import AsynapRous
@@ -254,6 +255,153 @@ async def hello(headers="guest", body="anonymous"):
         }
     )
 
+PEERS = {}
+CHANNELS = {}
+TRACKER_LOCK = threading.Lock()
+PEER_TIMEOUT = 60
+
+@app.route("/submit-info", methods=["POST"])
+def submit_info(headers="guest", body="anonymous"):
+    payload = _parse_body(body)
+    if not isinstance(payload, dict):
+        payload = {}
+    peer_id = payload.get("peer_id")
+    ip = payload.get("ip")
+    raw_port = payload.get("port")
+    
+    if not peer_id or not ip or raw_port is None:
+        return _response(
+            {"ok": False, "message": "Missing peer_id, ip, or port"},
+            status_code=400,
+        )
+        
+    try:
+        port = int(raw_port)
+        if not (1 <= port <= 65535):
+            raise ValueError
+    except ValueError:
+        return _response(
+            {"ok": False, "message": "Invalid port number. Must be 1-65535."},
+            status_code=400,
+        )
+        
+    peer_id = str(peer_id)
+    
+    with TRACKER_LOCK:
+        existing_channels = PEERS.get(peer_id, {}).get("channels", [])
+        PEERS[peer_id] = {
+            "ip": ip,
+            "port": port,
+            "channels": existing_channels,
+            "status": "online",
+            "last_seen": time.time(),
+        }
+
+    print("[Tracker] Peer registered/updated: {} at {}:{}".format(peer_id, ip, port))
+    return _response(
+        {
+            "ok": True,
+            "message": "Peer info submitted successfully",
+            "peer_id": peer_id,
+        }
+    )
+
+@app.route("/add-list", methods=["POST"])
+def add_list(headers="guest", body="anonymous"):
+    payload = _parse_body(body)
+    if not isinstance(payload, dict):
+        payload = {}
+    peer_id = payload.get("peer_id")
+    channel = payload.get("channel")
+
+    if not peer_id or not channel:
+        return _response(
+            {"ok": False, "message": "Missing peer_id or channel"},
+            status_code=400,
+        )
+        
+    peer_id = str(peer_id)
+    channel = str(channel)
+
+    with TRACKER_LOCK:
+        if peer_id not in PEERS:
+            return _response(
+                {"ok": False, "message": "Peer {} not registered.".format(peer_id)},
+                status_code=404,
+            )
+
+        if channel not in CHANNELS:
+            CHANNELS[channel] = set()
+        CHANNELS[channel].add(peer_id)
+
+        if channel not in PEERS[peer_id]["channels"]:
+            PEERS[peer_id]["channels"].append(channel)
+            
+        PEERS[peer_id]["last_seen"] = time.time()
+
+    print("[Tracker] Peer {} joined channel {}".format(peer_id, channel))
+    return _response(
+        {
+            "ok": True,
+            "message": "Added to channel {}".format(channel),
+        }
+    )
+
+@app.route("/get-list", methods=["GET", "POST"])
+def get_list(headers="guest", body="anonymous"):
+    current_time = time.time()
+    with TRACKER_LOCK:
+        active_peers = {
+            pid: pinfo for pid, pinfo in PEERS.items()
+            if (current_time - pinfo["last_seen"]) <= PEER_TIMEOUT
+        }
+        
+        serializable_channels = {}
+        for ch, members in CHANNELS.items():
+            active_members = [m for m in members if m in active_peers]
+            serializable_channels[ch] = sorted(active_members)
+            
+    return _response(
+        {
+            "ok": True,
+            "peers": active_peers,
+            "channels": serializable_channels,
+        }
+    )
+
+@app.route("/connect-peer", methods=["POST"])
+def connect_peer(headers="guest", body="anonymous"):
+    payload = _parse_body(body)
+    if not isinstance(payload, dict):
+        payload = {}
+    target_id = payload.get("target_peer_id")
+
+    if not target_id:
+        return _response(
+            {"ok": False, "message": "Missing target_peer_id"},
+            status_code=400,
+        )
+
+    target_id = str(target_id)
+    
+    with TRACKER_LOCK:
+        target_peer = PEERS.get(target_id)
+        if not target_peer or (time.time() - target_peer["last_seen"] > PEER_TIMEOUT):
+            return _response(
+                {"ok": False, "message": "Peer not found or offline"},
+                status_code=404,
+            )
+        ip = target_peer["ip"]
+        port = target_peer["port"]
+
+    return _response(
+        {
+            "ok": True,
+            "target_peer_id": target_id,
+            "ip": ip,
+            "port": port,
+        }
+    )
 
 def create_sampleapp(ip, port):
     app.prepare_address(ip, port)
