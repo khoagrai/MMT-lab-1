@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>P2P Chat</title>
+    <link rel="stylesheet" href="/static/css/styles.css">
+</head>
+<body>
+    <div class="chat-container">
+        <div class="sidebar">
+            <h3>Active Peers</h3>
+            <ul id="peers-list">
+                <li>127.0.0.1:8081</li>
+                <li>127.0.0.1:8082</li>
+            </ul>
+        </div>
+        <div class="main-chat">
+            <div class="chat-window" id="chat-window">
+                <!-- Messages will be displayed here -->
+            </div>
+            <div class="notification" id="notification" style="display: none;">
+                New messages arrived!
+            </div>
+            <div class="input-area">
+                <input type="text" id="target-ip" placeholder="Target IP">
+                <input type="text" id="target-port" placeholder="Target Port">
+                <input type="text" id="message-input" placeholder="Type your message...">
+                <button id="send-button">Send</button>
+                <button id="broadcast-button">Broadcast</button>
+            </div>
+        </div>
+    </div>
+    <script src="js/chat.js"></script>
+</body>
+</html>
