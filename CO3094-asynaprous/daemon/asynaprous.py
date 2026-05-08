@@ -76,27 +76,30 @@ class AsynapRous:
         :rtype: function - A decorator that registers the handler function.
         """
         def decorator(func):
-            for method in methods:
-                self.routes[(method.upper(), path)] = func
-
-            # Optional attach route metadata to the function
-            func._route_path = path
-            func._route_methods = methods
-
-            def sync_wrapper(*args, **kwargs):
-               print("[AsynapRous] running sync function...  [{}] {}".format(methods, path))
-               result = func(*args, **kwargs)
-               return result
-
-            async def async_wrapper(*args, **kwargs):
-               print("[AsynapRous] running Async function... [{}] {}".format(methods, path))
-               result = await func(*args, **kwargs)
-               return result
-
+            # Build the wrapper first, then register it so that the same
+            # object is both stored in self.routes and returned to the caller.
+            # Previously func was stored but sync_wrapper/async_wrapper was
+            # returned, meaning the print statements inside the wrappers were
+            # never reached during request handling.
             if inspect.iscoroutinefunction(func):
-               return async_wrapper
+                async def wrapper(*args, **kwargs):
+                    print("[AsynapRous] running Async function... [{}] {}".format(methods, path))
+                    result = await func(*args, **kwargs)
+                    return result
             else:
-               return sync_wrapper
+                def wrapper(*args, **kwargs):
+                    print("[AsynapRous] running sync function...  [{}] {}".format(methods, path))
+                    result = func(*args, **kwargs)
+                    return result
+
+            # Attach route metadata to the wrapper
+            wrapper._route_path = path
+            wrapper._route_methods = methods
+
+            for method in methods:
+                self.routes[(method.upper(), path)] = wrapper
+
+            return wrapper
         return decorator
 
     def run(self):
