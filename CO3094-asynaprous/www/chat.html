@@ -4,33 +4,125 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>P2P Chat</title>
-    <link rel="stylesheet" href="/static/css/styles.css">
+    <!-- <link rel="stylesheet" href="/css/styles.css"> -->
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { background: #f0f0f2; font-family: -apple-system, system-ui, "Segoe UI", sans-serif; height: 100vh; display: flex; flex-direction: column; }
+
+        .chat-container { display: flex; height: 100vh; max-width: 1100px; margin: 0 auto; width: 100%; background: white; box-shadow: 0 0 20px rgba(0,0,0,0.08); }
+
+        /* Sidebar */
+        .sidebar { width: 260px; flex-shrink: 0; background: #f8f8fa; border-right: 1px solid #e0e0e8; display: flex; flex-direction: column; padding: 16px; gap: 16px; overflow-y: auto; }
+        .sidebar h3 { font-size: 13px; font-weight: 600; color: #555; text-transform: uppercase; letter-spacing: 0.04em; }
+
+        .register-section, .peers-section { display: flex; flex-direction: column; gap: 8px; }
+        .register-section input, .peers-section input, .register-section select, .peers-section select {
+            width: 100%; padding: 7px 10px; border: 1px solid #d0d0d8; border-radius: 6px;
+            font-size: 13px; background: white; color: #333;
+        }
+        .register-section input:focus, .peers-section input:focus { outline: 2px solid #38488f; border-color: transparent; }
+
+        .btn { padding: 7px 12px; border: none; border-radius: 6px; font-size: 13px; cursor: pointer; width: 100%; font-weight: 500; }
+        .btn-primary { background: #38488f; color: white; }
+        .btn-primary:hover { background: #2d3a74; }
+        .btn-secondary { background: #e8e8f0; color: #333; }
+        .btn-secondary:hover { background: #d8d8e8; }
+
+        .peers-section select { height: 90px; }
+
+        /* Main chat */
+        .main-chat { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+
+        .chat-window {
+            flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 8px;
+            background: #fafafa;
+        }
+        .message { padding: 8px 12px; border-radius: 10px; font-size: 14px; max-width: 75%; word-break: break-word; }
+        .message.out { background: #38488f; color: white; align-self: flex-end; }
+        .message.in  { background: #e8e8f0; color: #222; align-self: flex-start; }
+
+        .notification {
+            background: #fffbea; border-top: 1px solid #f0e68c; color: #7a6800;
+            padding: 8px 16px; font-size: 13px; text-align: center;
+        }
+
+        .input-area {
+            border-top: 1px solid #e0e0e8; padding: 12px 16px; display: flex; gap: 8px; align-items: center; background: white;
+        }
+        .input-area input[type="text"] {
+            flex: 1; padding: 8px 12px; border: 1px solid #d0d0d8; border-radius: 6px; font-size: 14px;
+        }
+        .input-area input[type="text"]:focus { outline: 2px solid #38488f; border-color: transparent; }
+        .input-area .ip-port { display: flex; gap: 6px; }
+        .input-area .ip-port input { width: 110px; }
+        .input-area .ip-port input:last-child { width: 70px; }
+        .send-btn { padding: 8px 14px; background: #38488f; color: white; border: none; border-radius: 6px; cursor: pointer; font-size: 14px; font-weight: 500; white-space: nowrap; }
+        .send-btn:hover { background: #2d3a74; }
+        .broadcast-btn { padding: 8px 14px; background: #e8e8f0; color: #333; border: none; border-radius: 6px; cursor: pointer; font-size: 14px; font-weight: 500; white-space: nowrap; }
+        .broadcast-btn:hover { background: #d8d8e8; }
+
+        .divider { border: none; border-top: 1px solid #e0e0e8; }
+    </style>
 </head>
 <body>
     <div class="chat-container">
+
+        <!-- Sidebar -->
         <div class="sidebar">
-            <h3>Active Peers</h3>
-            <ul id="peers-list">
-                <li>127.0.0.1:8081</li>
-                <li>127.0.0.1:8082</li>
-            </ul>
-        </div>
-        <div class="main-chat">
-            <div class="chat-window" id="chat-window">
-                <!-- Messages will be displayed here -->
+
+            <!-- Register as peer -->
+            <div class="register-section">
+                <h3>Register peer</h3>
+                <input type="text" id="peer-id"   placeholder="Peer ID (e.g. khoi)">
+                <input type="text" id="peer-ip"   placeholder="My IP (e.g. 127.0.0.1)">
+                <input type="text" id="peer-port" placeholder="My port (e.g. 8001)">
+                <input type="text" id="channel"   placeholder="Channel (default: general)">
+                <button class="btn btn-primary" id="register-button">Register</button>
             </div>
+
+            <hr class="divider">
+
+            <!-- Active peers -->
+            <div class="peers-section">
+                <h3>Active peers</h3>
+                <!-- chat.js populates this select with online peers from /get-list -->
+                <select id="peer-select" size="5">
+                    <option disabled>Loading peers...</option>
+                </select>
+                <button class="btn btn-secondary" id="refresh-button">&#8635; Refresh peers</button>
+            </div>
+
+        </div>
+
+        <!-- Main chat area -->
+        <div class="main-chat">
+
+            <!-- Message history -->
+            <div class="chat-window" id="chat-window">
+                <!-- Messages rendered by chat.js via updateChatWindow() -->
+            </div>
+
+            <!-- New-message notification (hidden by default) -->
             <div class="notification" id="notification" style="display: none;">
                 New messages arrived!
             </div>
+
+            <!-- Input area -->
             <div class="input-area">
-                <input type="text" id="target-ip" placeholder="Target IP">
-                <input type="text" id="target-port" placeholder="Target Port">
+                <!-- Fallback manual IP/port when no peer is selected in the list -->
+                <div class="ip-port">
+                    <input type="text" id="target-ip"   placeholder="Target IP">
+                    <input type="text" id="target-port" placeholder="Port">
+                </div>
                 <input type="text" id="message-input" placeholder="Type your message...">
-                <button id="send-button">Send</button>
-                <button id="broadcast-button">Broadcast</button>
+                <button class="send-btn"      id="send-button">Send</button>
+                <button class="broadcast-btn" id="broadcast-button">Broadcast</button>
             </div>
+
         </div>
     </div>
-    <script src="js/chat.js"></script>
+
+    <!-- chat.js path resolves to static/js/chat.js via response.py MIME routing -->
+    <script src="/js/chat.js"></script>
 </body>
 </html>
