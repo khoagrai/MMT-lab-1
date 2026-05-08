@@ -1,75 +1,71 @@
-# Copyright (C) 2026 pdnguyen of HCMC University of Technology VNU-HCM.
-# All rights reserved.
-# This file is part of the CO3093/CO3094 course,
-# and is released under the "MIT License Agreement". Please see the LICENSE
-# file that should have been included as part of this package.
-#
-# AsynapRous release
-#
-# The authors hereby grant to Licensee personal permission to use
-# and modify the Licensed Source Code for the sole purpose of studying
-# while attending the course
-#
-"""
-app.sampleapp
-~~~~~~~~~~~~~~~~~
-"""
+"""Hybrid client-server + P2P chat application for AsynapRous."""
 
 import json
 import secrets
-import time
 import threading
-from urllib.parse import parse_qs
-import urllib.request
+import time
 import urllib.error
+import urllib.request
+from urllib.parse import parse_qs
 
 from daemon import AsynapRous
 
 app = AsynapRous()
 
-CHAT_HISTORY = []
-
 USERS = {
     "admin": "123456",
     "khoi": "123456",
     "user1": "123456",
+    "user2": "123456",
 }
 
 SESSION_COOKIE_NAME = "session_id"
 SESSION_TTL_SECONDS = 3600
 SESSIONS = {}
+SESSIONS_LOCK = threading.Lock()
+
+PEER_TIMEOUT = 120
+PEERS = {}
+CHANNELS = {}
+TRACKER_LOCK = threading.Lock()
+
+CHAT_HISTORY = []
+HISTORY_LOCK = threading.Lock()
+
+
+def route(path, methods):
+    """Register a route and also register the trailing-slash alias."""
+    def decorator(func):
+        for method in methods:
+            app.routes[(method.upper(), path)] = func
+            if not path.endswith("/"):
+                app.routes[(method.upper(), path + "/")] = func
+        return func
+    return decorator
 
 
 def _normalize_headers(headers):
-    if headers is None:
+    if not headers:
         return {}
-
-    if isinstance(headers, dict):
-        return {str(k).lower(): str(v) for k, v in headers.items()}
-
     try:
-        return {str(k).lower(): str(v) for k, v in dict(headers).items()}
-    except Exception:
-        return {}
+        items = headers.items()
+    except AttributeError:
+        items = dict(headers).items()
+    return {str(key).lower(): str(value) for key, value in items}
 
 
 def _parse_body(body):
     if body is None:
         return {}
-
     if isinstance(body, dict):
         return body
-
     if isinstance(body, (bytes, bytearray)):
         body = body.decode("utf-8", errors="ignore")
-
     if not isinstance(body, str):
         body = str(body)
-
     body = body.strip()
     if not body:
         return {}
-
     try:
         return json.loads(body)
     except json.JSONDecodeError:
@@ -84,13 +80,11 @@ def _parse_cookie_header(cookie_header):
     cookies = {}
     if not cookie_header:
         return cookies
-
     for item in cookie_header.split(";"):
         if "=" not in item:
             continue
         key, value = item.split("=", 1)
         cookies[key.strip()] = value.strip()
-
     return cookies
 
 
@@ -102,10 +96,7 @@ def _make_cookie(session_id, max_age=SESSION_TTL_SECONDS):
 
 
 def _clear_cookie():
-    return (
-        f"{SESSION_COOKIE_NAME}=; "
-        f"Path=/; HttpOnly; SameSite=Lax; Max-Age=0"
-    )
+    return f"{SESSION_COOKIE_NAME}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0"
 
 
 def _response(body, status_code=200, headers=None):
@@ -118,392 +109,316 @@ def _response(body, status_code=200, headers=None):
 
 def _create_session(username):
     session_id = secrets.token_hex(16)
-    SESSIONS[session_id] = {
-        "username": username,
-        "expires_at": time.time() + SESSION_TTL_SECONDS,
-    }
+    with SESSIONS_LOCK:
+        SESSIONS[session_id] = {
+            "username": username,
+            "expires_at": time.time() + SESSION_TTL_SECONDS,
+        }
     return session_id
 
 
 def _read_session(headers):
     normalized_headers = _normalize_headers(headers)
-    cookie_header = normalized_headers.get("cookie", "")
-    cookies = _parse_cookie_header(cookie_header)
-
+    cookies = _parse_cookie_header(normalized_headers.get("cookie", ""))
     session_id = cookies.get(SESSION_COOKIE_NAME)
     if not session_id:
         return None, None
 
-    session = SESSIONS.get(session_id)
-    if not session:
-        return session_id, None
-
-    if session["expires_at"] < time.time():
-        del SESSIONS[session_id]
-        return session_id, None
-
-    return session_id, session
+    with SESSIONS_LOCK:
+        session = SESSIONS.get(session_id)
+        if not session:
+            return session_id, None
+        if session["expires_at"] < time.time():
+            del SESSIONS[session_id]
+            return session_id, None
+        return session_id, session
 
 
 def _require_login(headers):
     _, session = _read_session(headers)
     if not session:
-        return (
-            False,
-            None,
-            _response(
-                {
-                    "ok": False,
-                    "message": "Unauthorized. Please login first."
-                },
-                status_code=401,
-            ),
+        return False, None, _response(
+            {"ok": False, "message": "Unauthorized. Please login first."},
+            status_code=401,
         )
-
     return True, session["username"], None
 
 
-@app.route("/login", methods=["POST", "PUT"])
+def _append_message(sender, message, channel="general", direction="in"):
+    item = {
+        "sender": sender,
+        "message": message,
+        "channel": channel,
+        "direction": direction,
+        "timestamp": time.time(),
+    }
+    with HISTORY_LOCK:
+        CHAT_HISTORY.append(item)
+    return item
+
+
+def _active_peers_locked():
+    now = time.time()
+    return {
+        peer_id: dict(peer)
+        for peer_id, peer in PEERS.items()
+        if now - peer.get("last_seen", 0) <= PEER_TIMEOUT
+    }
+
+
+def _send_peer_worker(target_ip, target_port, message, sender, channel="general"):
+    url = f"http://{target_ip}:{int(target_port)}/receive-message"
+    payload = json.dumps(
+        {"message": message, "sender": sender, "channel": channel}
+    ).encode("utf-8")
+    request = urllib.request.Request(
+        url,
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=3) as response:
+            ok = 200 <= response.status < 300
+            print(f"[P2P] send {sender} -> {target_ip}:{target_port} ok={ok}")
+            return ok, None
+    except (urllib.error.URLError, OSError, ValueError) as exc:
+        print(f"[P2P] send failed to {target_ip}:{target_port}: {exc}")
+        return False, str(exc)
+
+
+@route("/login", ["POST", "PUT"])
 def login(headers="guest", body="anonymous"):
     payload = _parse_body(body)
-    username = payload.get("username", "")
-    password = payload.get("password", "")
-
-    print("[SampleApp] login payload={}".format(payload))
-
+    username = str(payload.get("username", ""))
+    password = str(payload.get("password", ""))
     if USERS.get(username) != password:
         return _response(
-            {
-                "ok": False,
-                "message": "Invalid username or password",
-            },
+            {"ok": False, "message": "Invalid username or password"},
             status_code=401,
         )
 
     session_id = _create_session(username)
-
     return _response(
-        {
-            "ok": True,
-            "message": "Login successful",
-            "username": username,
-        },
-        status_code=200,
-        headers={
-            "Set-Cookie": _make_cookie(session_id),
-        },
+        {"ok": True, "message": "Login successful", "username": username},
+        headers={"Set-Cookie": _make_cookie(session_id)},
     )
 
 
-@app.route("/logout", methods=["POST"])
+@route("/logout", ["POST"])
 def logout(headers="guest", body="anonymous"):
     session_id, session = _read_session(headers)
-
-    if session_id and session_id in SESSIONS:
-        del SESSIONS[session_id]
-
+    with SESSIONS_LOCK:
+        if session_id in SESSIONS:
+            del SESSIONS[session_id]
     return _response(
-        {
-            "ok": True,
-            "message": "Logged out",
-            "had_session": session is not None,
-        },
-        headers={
-            "Set-Cookie": _clear_cookie(),
-        },
+        {"ok": True, "message": "Logged out", "had_session": session is not None},
+        headers={"Set-Cookie": _clear_cookie()},
     )
 
 
-@app.route("/me", methods=["GET"])
+@route("/me", ["GET"])
 def me(headers="guest", body="anonymous"):
-    ok, username, error_response = _require_login(headers)
+    ok, username, error = _require_login(headers)
     if not ok:
-        return error_response
-
-    return _response(
-        {
-            "ok": True,
-            "username": username,
-        }
-    )
+        return error
+    return _response({"ok": True, "username": username})
 
 
-@app.route("/echo", methods=["POST"])
-def echo(headers="guest", body="anonymous"):
-    print("[SampleApp] received body {}".format(body))
-    payload = _parse_body(body)
-
-    return _response(
-        {
-            "ok": True,
-            "received": payload,
-        }
-    )
-
-
-@app.route("/hello", methods=["POST", "PUT"])
+@route("/hello", ["POST", "PUT"])
 async def hello(headers="guest", body="anonymous"):
-    ok, username, error_response = _require_login(headers)
+    ok, username, error = _require_login(headers)
     if not ok:
-        return error_response
-
+        return error
     payload = _parse_body(body)
     message = payload.get("message", "Hello")
+    return _response({"ok": True, "message": f"{message}, {username}!"})
 
-    print("[SampleApp] protected hello user={} body={}".format(username, payload))
 
-    return _response(
-        {
-            "ok": True,
-            "message": f"{message}, {username}!",
-        }
-    )
-
-PEERS = {}
-CHANNELS = {}
-TRACKER_LOCK = threading.Lock()
-PEER_TIMEOUT = 60
-
-@app.route("/submit-info", methods=["POST"])
+@route("/submit-info", ["POST"])
 def submit_info(headers="guest", body="anonymous"):
+    ok, username, error = _require_login(headers)
+    if not ok:
+        return error
+
     payload = _parse_body(body)
-    if not isinstance(payload, dict):
-        payload = {}
-    peer_id = payload.get("peer_id")
+    peer_id = str(payload.get("peer_id") or username)
     ip = payload.get("ip")
     raw_port = payload.get("port")
-    
-    if not peer_id or not ip or raw_port is None:
-        return _response(
-            {"ok": False, "message": "Missing peer_id, ip, or port"},
-            status_code=400,
-        )
-        
+    if not ip or raw_port is None:
+        return _response({"ok": False, "message": "Missing ip or port"}, status_code=400)
+
     try:
         port = int(raw_port)
-        if not (1 <= port <= 65535):
+        if not 1 <= port <= 65535:
             raise ValueError
-    except ValueError:
-        return _response(
-            {"ok": False, "message": "Invalid port number. Must be 1-65535."},
-            status_code=400,
-        )
-        
-    peer_id = str(peer_id)
-    
+    except (TypeError, ValueError):
+        return _response({"ok": False, "message": "Invalid port number"}, status_code=400)
+
     with TRACKER_LOCK:
-        existing_channels = PEERS.get(peer_id, {}).get("channels", [])
+        existing = PEERS.get(peer_id, {})
         PEERS[peer_id] = {
-            "ip": ip,
+            "ip": str(ip),
             "port": port,
-            "channels": existing_channels,
+            "channels": existing.get("channels", []),
             "status": "online",
             "last_seen": time.time(),
+            "owner": username,
         }
 
-    print("[Tracker] Peer registered/updated: {} at {}:{}".format(peer_id, ip, port))
-    return _response(
-        {
-            "ok": True,
-            "message": "Peer info submitted successfully",
-            "peer_id": peer_id,
-        }
-    )
+    return _response({"ok": True, "message": "Peer registered", "peer_id": peer_id})
 
-@app.route("/add-list", methods=["POST"])
+
+@route("/add-list", ["POST"])
 def add_list(headers="guest", body="anonymous"):
-    payload = _parse_body(body)
-    if not isinstance(payload, dict):
-        payload = {}
-    peer_id = payload.get("peer_id")
-    channel = payload.get("channel")
+    ok, username, error = _require_login(headers)
+    if not ok:
+        return error
 
-    if not peer_id or not channel:
-        return _response(
-            {"ok": False, "message": "Missing peer_id or channel"},
-            status_code=400,
-        )
-        
-    peer_id = str(peer_id)
-    channel = str(channel)
+    payload = _parse_body(body)
+    peer_id = str(payload.get("peer_id") or username)
+    channel = str(payload.get("channel") or "general")
 
     with TRACKER_LOCK:
         if peer_id not in PEERS:
             return _response(
-                {"ok": False, "message": "Peer {} not registered.".format(peer_id)},
+                {"ok": False, "message": "Peer is not registered"},
                 status_code=404,
             )
-
-        if channel not in CHANNELS:
-            CHANNELS[channel] = set()
-        CHANNELS[channel].add(peer_id)
-
+        CHANNELS.setdefault(channel, set()).add(peer_id)
         if channel not in PEERS[peer_id]["channels"]:
             PEERS[peer_id]["channels"].append(channel)
-            
         PEERS[peer_id]["last_seen"] = time.time()
 
-    print("[Tracker] Peer {} joined channel {}".format(peer_id, channel))
-    return _response(
-        {
-            "ok": True,
-            "message": "Added to channel {}".format(channel),
-        }
-    )
+    return _response({"ok": True, "message": f"Joined channel {channel}"})
 
-@app.route("/get-list", methods=["GET", "POST"])
+
+@route("/get-list", ["GET", "POST"])
 def get_list(headers="guest", body="anonymous"):
-    current_time = time.time()
-    with TRACKER_LOCK:
-        active_peers = {
-            pid: pinfo for pid, pinfo in PEERS.items()
-            if (current_time - pinfo["last_seen"]) <= PEER_TIMEOUT
-        }
-        
-        serializable_channels = {}
-        for ch, members in CHANNELS.items():
-            active_members = [m for m in members if m in active_peers]
-            serializable_channels[ch] = sorted(active_members)
-            
-    return _response(
-        {
-            "ok": True,
-            "peers": active_peers,
-            "channels": serializable_channels,
-        }
-    )
+    ok, _, error = _require_login(headers)
+    if not ok:
+        return error
 
-@app.route("/connect-peer", methods=["POST"])
+    with TRACKER_LOCK:
+        active_peers = _active_peers_locked()
+        channels = {
+            channel: sorted(peer_id for peer_id in members if peer_id in active_peers)
+            for channel, members in CHANNELS.items()
+        }
+
+    return _response({"ok": True, "peers": active_peers, "channels": channels})
+
+
+@route("/connect-peer", ["POST"])
 def connect_peer(headers="guest", body="anonymous"):
+    ok, _, error = _require_login(headers)
+    if not ok:
+        return error
+
     payload = _parse_body(body)
-    if not isinstance(payload, dict):
-        payload = {}
-    target_id = payload.get("target_peer_id")
-
+    target_id = str(payload.get("target_peer_id") or "")
     if not target_id:
-        return _response(
-            {"ok": False, "message": "Missing target_peer_id"},
-            status_code=400,
-        )
+        return _response({"ok": False, "message": "Missing target_peer_id"}, status_code=400)
 
-    target_id = str(target_id)
-    
     with TRACKER_LOCK:
-        target_peer = PEERS.get(target_id)
-        if not target_peer or (time.time() - target_peer["last_seen"] > PEER_TIMEOUT):
-            return _response(
-                {"ok": False, "message": "Peer not found or offline"},
-                status_code=404,
-            )
-        ip = target_peer["ip"]
-        port = target_peer["port"]
+        active_peers = _active_peers_locked()
+        peer = active_peers.get(target_id)
 
-    return _response(
-        {
-            "ok": True,
-            "target_peer_id": target_id,
-            "ip": ip,
-            "port": port,
-        }
-    )
+    if not peer:
+        return _response({"ok": False, "message": "Peer not found or offline"}, status_code=404)
+    return _response({"ok": True, "target_peer_id": target_id, **peer})
 
-@app.route("/send-peer", methods=["POST"])
+
+@route("/send-peer", ["POST"])
 def send_peer(headers="guest", body="anonymous"):
+    ok, username, error = _require_login(headers)
+    if not ok:
+        return error
+
     payload = _parse_body(body)
     target_ip = payload.get("target_ip")
     target_port = payload.get("target_port")
     message = payload.get("message")
-
+    channel = payload.get("channel", "general")
     if not all([target_ip, target_port, message]):
         return _response(
             {"ok": False, "message": "Missing target_ip, target_port, or message"},
             status_code=400,
         )
 
-    _, session = _read_session(headers)
-    # Tên xưng hô với máy khác
-    network_sender = session["username"] if session and "username" in session else "Anonymous Peer"
-
-    url = f"http://{target_ip}:{target_port}/receive-message"
-    data = json.dumps({"message": message, "sender": network_sender}).encode("utf-8")
-    req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
-
-    try:
-        with urllib.request.urlopen(req, timeout=5) as response:
-            if response.status == 200:
-                CHAT_HISTORY.append({"sender": "Me", "message": message, "timestamp": time.time()})
-                return _response({"ok": True, "message": "Message sent successfully"})
-            else:
-                return _response({"ok": False, "message": f"Failed to send message: {response.status}"}, status_code=500)
-    except urllib.error.URLError as e:
-        return _response({"ok": False, "message": f"Failed to send message: {str(e)}"}, status_code=500)
-    except Exception as e:
-        return _response({"ok": False, "message": f"Unexpected error: {str(e)}"}, status_code=500)
+    _append_message("Me", message, channel=channel, direction="out")
+    thread = threading.Thread(
+        target=_send_peer_worker,
+        args=(target_ip, target_port, message, username, channel),
+        daemon=True,
+    )
+    thread.start()
+    return _response({"ok": True, "message": "Message queued for P2P sending"})
 
 
-@app.route("/broadcast-peer", methods=["POST"])
+@route("/broadcast-peer", ["POST"])
 def broadcast_peer(headers="guest", body="anonymous"):
+    ok, username, error = _require_login(headers)
+    if not ok:
+        return error
+
     payload = _parse_body(body)
-    peers = payload.get("peers", [])
     message = payload.get("message")
+    channel = payload.get("channel", "general")
+    own_peer_id = str(payload.get("peer_id") or username)
+    peers = payload.get("peers")
 
-    if not message or not peers:
-        return _response(
-            {"ok": False, "message": "Missing message or peers"},
-            status_code=400,
-        )
+    if not message:
+        return _response({"ok": False, "message": "Missing message"}, status_code=400)
 
-    _, session = _read_session(headers)
-    network_sender = session["username"] if session and "username" in session else "Anonymous Peer"
+    if not peers:
+        with TRACKER_LOCK:
+            active_peers = _active_peers_locked()
+            peers = [
+                peer for peer_id, peer in active_peers.items()
+                if peer_id != own_peer_id
+            ]
 
-    results = []
-    sent_any = False
+    queued = []
     for peer in peers:
         target_ip = peer.get("ip")
         target_port = peer.get("port")
         if not target_ip or not target_port:
-            results.append({"peer": peer, "success": False, "error": "Missing ip or port"})
+            queued.append({"peer": peer, "queued": False, "error": "Missing ip or port"})
             continue
+        thread = threading.Thread(
+            target=_send_peer_worker,
+            args=(target_ip, target_port, message, username, channel),
+            daemon=True,
+        )
+        thread.start()
+        queued.append({"peer": peer, "queued": True})
 
-        url = f"http://{target_ip}:{target_port}/receive-message"
-        data = json.dumps({"message": message, "sender": network_sender}).encode("utf-8")
-        req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
-
-        try:
-            with urllib.request.urlopen(req, timeout=5) as response:
-                if response.status == 200:
-                    results.append({"peer": peer, "success": True})
-                    sent_any = True
-                else:
-                    results.append({"peer": peer, "success": False, "error": f"Status {response.status}"})
-        except urllib.error.URLError as e:
-            results.append({"peer": peer, "success": False, "error": str(e)})
-        except Exception as e:
-            results.append({"peer": peer, "success": False, "error": str(e)})
-
-    if sent_any:
-        CHAT_HISTORY.append({"sender": "Me", "message": message, "timestamp": time.time()})
-
-    return _response({"ok": True, "results": results})
+    _append_message("Me", message, channel=channel, direction="out")
+    return _response({"ok": True, "message": "Broadcast queued", "results": queued})
 
 
-@app.route("/receive-message", methods=["POST"])
+@route("/receive-message", ["POST"])
 def receive_message(headers="guest", body="anonymous"):
     payload = _parse_body(body)
     message = payload.get("message")
     sender = payload.get("sender", "unknown")
-
+    channel = payload.get("channel", "general")
     if not message:
         return _response({"ok": False, "message": "No message provided"}, status_code=400)
 
-    CHAT_HISTORY.append({"sender": sender, "message": message, "timestamp": time.time()})
-
+    _append_message(sender, message, channel=channel, direction="in")
     return _response({"ok": True, "message": "Message received"})
 
 
-@app.route("/poll-messages", methods=["GET"])
+@route("/poll-messages", ["GET"])
 def poll_messages(headers="guest", body="anonymous"):
-    return _response({"ok": True, "messages": CHAT_HISTORY})
+    ok, _, error = _require_login(headers)
+    if not ok:
+        return error
+    with HISTORY_LOCK:
+        messages = list(CHAT_HISTORY)
+    return _response({"ok": True, "messages": messages})
 
 
 def create_sampleapp(ip, port):
