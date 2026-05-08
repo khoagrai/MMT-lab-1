@@ -20,10 +20,14 @@ import secrets
 import time
 import threading
 from urllib.parse import parse_qs
+import urllib.request
+import urllib.error
 
 from daemon import AsynapRous
 
 app = AsynapRous()
+
+CHAT_HISTORY = []
 
 USERS = {
     "admin": "123456",
@@ -402,6 +406,105 @@ def connect_peer(headers="guest", body="anonymous"):
             "port": port,
         }
     )
+
+@app.route("/send-peer", methods=["POST"])
+def send_peer(headers="guest", body="anonymous"):
+    payload = _parse_body(body)
+    target_ip = payload.get("target_ip")
+    target_port = payload.get("target_port")
+    message = payload.get("message")
+
+    if not all([target_ip, target_port, message]):
+        return _response(
+            {"ok": False, "message": "Missing target_ip, target_port, or message"},
+            status_code=400,
+        )
+
+    _, session = _read_session(headers)
+    # Tên xưng hô với máy khác
+    network_sender = session["username"] if session and "username" in session else "Anonymous Peer"
+
+    url = f"http://{target_ip}:{target_port}/receive-message"
+    data = json.dumps({"message": message, "sender": network_sender}).encode("utf-8")
+    req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
+
+    try:
+        with urllib.request.urlopen(req, timeout=5) as response:
+            if response.status == 200:
+                CHAT_HISTORY.append({"sender": "Me", "message": message, "timestamp": time.time()})
+                return _response({"ok": True, "message": "Message sent successfully"})
+            else:
+                return _response({"ok": False, "message": f"Failed to send message: {response.status}"}, status_code=500)
+    except urllib.error.URLError as e:
+        return _response({"ok": False, "message": f"Failed to send message: {str(e)}"}, status_code=500)
+    except Exception as e:
+        return _response({"ok": False, "message": f"Unexpected error: {str(e)}"}, status_code=500)
+
+
+@app.route("/broadcast-peer", methods=["POST"])
+def broadcast_peer(headers="guest", body="anonymous"):
+    payload = _parse_body(body)
+    peers = payload.get("peers", [])
+    message = payload.get("message")
+
+    if not message or not peers:
+        return _response(
+            {"ok": False, "message": "Missing message or peers"},
+            status_code=400,
+        )
+
+    _, session = _read_session(headers)
+    network_sender = session["username"] if session and "username" in session else "Anonymous Peer"
+
+    results = []
+    sent_any = False
+    for peer in peers:
+        target_ip = peer.get("ip")
+        target_port = peer.get("port")
+        if not target_ip or not target_port:
+            results.append({"peer": peer, "success": False, "error": "Missing ip or port"})
+            continue
+
+        url = f"http://{target_ip}:{target_port}/receive-message"
+        data = json.dumps({"message": message, "sender": network_sender}).encode("utf-8")
+        req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
+
+        try:
+            with urllib.request.urlopen(req, timeout=5) as response:
+                if response.status == 200:
+                    results.append({"peer": peer, "success": True})
+                    sent_any = True
+                else:
+                    results.append({"peer": peer, "success": False, "error": f"Status {response.status}"})
+        except urllib.error.URLError as e:
+            results.append({"peer": peer, "success": False, "error": str(e)})
+        except Exception as e:
+            results.append({"peer": peer, "success": False, "error": str(e)})
+
+    if sent_any:
+        CHAT_HISTORY.append({"sender": "Me", "message": message, "timestamp": time.time()})
+
+    return _response({"ok": True, "results": results})
+
+
+@app.route("/receive-message", methods=["POST"])
+def receive_message(headers="guest", body="anonymous"):
+    payload = _parse_body(body)
+    message = payload.get("message")
+    sender = payload.get("sender", "unknown")
+
+    if not message:
+        return _response({"ok": False, "message": "No message provided"}, status_code=400)
+
+    CHAT_HISTORY.append({"sender": sender, "message": message, "timestamp": time.time()})
+
+    return _response({"ok": True, "message": "Message received"})
+
+
+@app.route("/poll-messages", methods=["GET"])
+def poll_messages(headers="guest", body="anonymous"):
+    return _response({"ok": True, "messages": CHAT_HISTORY})
+
 
 def create_sampleapp(ip, port):
     app.prepare_address(ip, port)
